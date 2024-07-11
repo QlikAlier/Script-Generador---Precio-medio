@@ -1,0 +1,409 @@
+///$tab Main
+SET ThousandSep='.';
+SET DecimalSep=',';
+SET MoneyThousandSep='.';
+SET MoneyDecimalSep=',';
+SET MoneyFormat='#.##0,00 €;-#.##0,00 €';
+SET TimeFormat='h:mm:ss';
+SET DateFormat='D/M/YYYY';
+SET TimestampFormat='D/M/YYYY h:mm:ss[.fff]';
+SET FirstWeekDay=0;
+SET BrokenWeeks=0;
+SET ReferenceDay=4;
+SET FirstMonthOfYear=1;
+SET CollationLocale='es-ES';
+SET CreateSearchIndexOnReload=1;
+SET MonthNames='ene.;feb.;mar.;abr.;may.;jun.;jul.;ago.;sept.;oct.;nov.;dic.';
+SET LongMonthNames='enero;febrero;marzo;abril;mayo;junio;julio;agosto;septiembre;octubre;noviembre;diciembre';
+SET DayNames='lun.;mar.;mié.;jue.;vie.;sáb.;dom.';
+SET LongDayNames='lunes;martes;miércoles;jueves;viernes;sábado;domingo';
+SET NumericalAbbreviation='3:k;6:M;9:G;12:T;15:P;18:E;21:Z;24:Y;-3:m;-6:μ;-9:n;-12:p;-15:f;-18:a;-21:z;-24:y';
+///$tab Variables
+//////////////////////////////////////////////////////////////////////
+// Script Generador - Stage Precio medio
+//
+// Versión 	Fecha		Autor					Descripción
+// 2.0.24	04/07/24	Florenci Gonzalez		Stage Precio medio
+/////////////////////////////////////////////////////////////////////
+
+// Versión documento
+Set vVersion = '2.0.24'; 
+
+// Nombre de la connexión ODBC a la base de datos
+Set vConnection = 'ALIER_DATA:ODBC_(via_Direct_Access_gateway)';
+
+// Nombre de la base de datos origen
+Set vDatabase = 'ALIER';
+
+// Nombre de la ruta donde se guardan los QVDs
+if Right(DocumentTitle(), 4) = 'TEST' then
+	Set vPath = 'TEST_DATA:DataFiles';
+Else
+	Set vPath = 'ALIER_DATA:DataFiles';
+End If;
+
+// Connexión ODBC para las consultas SQL
+LIB CONNECT TO '$(vConnection)';
+///$tab Procedures
+//////////////////////////////////////////////////////////////////////
+// Script Generador - Stage Precio medio
+//
+// Versión 	Fecha		Autor					Descripción
+// 2.0.24	04/07/24	Florenci Gonzalez		Stage Precio medio
+/////////////////////////////////////////////////////////////////////
+
+$(Must_Include=lib://ALIER_DATA:DataFiles/SBO_procedures.qvs);
+///$tab 1.0 - Precio medio
+//////////////////////////////////////////////////////////////////////
+// Generador QVDs 
+//
+// Versión 	Fecha		Autor					Descripción
+// 1.5.13	08/02/23	Florenci Gonzalez		Afegida secció per calcular el preu mig de les matèries primeres
+// 1.5.15	17/02/23	Florenci Gonzalez		Afegir els químics al càlcul del preu mig
+// 1.5.19	06/03/23	Florenci Gonzalez		Error repartiment per màquina en preu mig
+// 1.5.23	13/04/23	Florenci Gonzalez		Afegir venda gestió de residu per PMA i GESTREPMA
+/////////////////////////////////////////////////////////////////////
+
+Call Print('4.2 - Precio medio');
+
+[MAP_PMItem]:
+	Mapping
+    LOAD
+        "ItemCode",
+        "ItmsGrpCod"
+    FROM [lib://$(vPath)/Items.qvd]
+    (qvd)
+    Where "ItmsGrpCod" <> 113; // Excloure les pastes
+
+//>> 1.5.23 FGT 13/04/23
+// [MAP_Type]:
+// 	Mapping
+// 	Load * Inline [
+//     	Code, Type
+// 		100, Consumo Materia Prima
+//         101, Químicos y auxiliares
+//         102, Químicos y auxiliares
+//         119, Químicos y auxiliares
+//         122, Químicos y auxiliares
+//         103, Químicos y auxiliares
+// 	];
+    
+[Type]:
+	Load * Inline [
+    	Code, Type
+		100, Consumo Materia Prima
+        101, Químicos y auxiliares
+        102, Químicos y auxiliares
+        119, Químicos y auxiliares
+        122, Químicos y auxiliares
+        103, Químicos y auxiliares
+	];
+    
+[ItemGroupFilter]:
+ 	Load
+    	Chr(39) & Concat(Code , Chr(39) & ',' & Chr(39)) & Chr(39) as "Filter"
+    Resident [Type];
+    
+Let vGroupFilter = Peek('Filter', -1, 'ItemGroupFilter');   
+
+Trace Filtro grupo artículos: $(vGroupFilter);
+
+[MAP_Type]:
+	Mapping
+	Load 
+    	Code,
+        Type
+	Resident [Type];
+    
+Drop Tables [Type], [ItemGroupFilter];    
+
+// [GestionResiduo]:
+// 	Load * Inline [
+//     	Code, Type
+// 		TPK, GESTRE
+//         PMA, GESTREPMA
+// 	];  
+
+[GestionResiduo]:
+    Load
+    	"ItemCode" as "Code",
+        "U_SE_AL_AFSGMP" as "Type"
+	FROM [lib://$(vPath)/Items.qvd]
+	(qvd)
+    Where Len(Trim("U_SE_AL_AFSGMP")) <> 0;
+
+[GestionResiduoFilter]:
+ 	Load
+    	Chr(39) & Concat(Type , Chr(39) & ',' & Chr(39)) & Chr(39) as "Filter"
+    Resident [GestionResiduo];
+    
+Let vResiduoFilter = Peek('Filter', -1, 'GestionResiduoFilter');    
+
+Trace Filtro residuos artículo: $(vResiduoFilter);
+
+[MAP_GestionResiduo]:
+	Mapping
+	Load 
+    	Code,
+        Type
+	Resident [GestionResiduo];
+    
+Drop Tables [GestionResiduo], [GestionResiduoFilter];    
+//>> 1.5.23 FGT 13/04/23
+
+//>> Calcular repartiment de fabricació per grup article i màquina
+[RepartoFabricacionPM]:
+    Load
+    	'Salida' as "Ent/Sal",
+        'Emisión componentes' as "Operación",
+        Floor("Fecha reparto") & '_*_*' as Key,
+        "Grupo artículo reparto" as "Grupo artículo PM",
+		"Máquina reparto" as "Máquina PM",               
+        "Porcentaje",
+        "Porcentaje 1ª"
+	FROM [lib://$(vPath)/RepartoFabricacion.qvd]
+	(qvd);
+    
+    Concatenate
+    Load
+    	'Salida' as "Ent/Sal",
+        'Emisión componentes' as "Operación",
+        Floor("Fecha reparto") & '_' & "Grupo artículo reparto" & '_MP' & "Máquina reparto" as Key,
+        "Grupo artículo reparto" as "Grupo artículo PM",
+		"Máquina reparto" as "Máquina PM",               
+        1 AS "Porcentaje",
+        1 AS "Porcentaje 1ª"
+	FROM [lib://$(vPath)/RepartoFabricacion.qvd]
+	(qvd);
+
+// Articles de Matèria primera que no són Gestió de residus
+[Items]:
+    LOAD
+        "ItemCode",
+        ApplyMap('MAP_Type', "ItmsGrpCod", '') as "Tipo",
+        ApplyMap('MAP_GestionResiduo', "ItemCode", '') as "Gestión residuo"
+    FROM [lib://$(vPath)/Items.qvd]
+    (qvd)
+    //>> 1.5.23 FGT 13/04/23
+    //where Match("ItmsGrpCod", 100, 101, 102, 119, 122, 103) <> 0 and "ItemType" = 'I' and "ItemCode" <> 'GESTRE';
+    where Match("ItmsGrpCod", $(vGroupFilter)) <> 0 and "ItemType" = 'I' and Match("ItemCode", $(vResiduoFilter)) = 0;
+    //<< 1.5.23 FGT 13/04/23
+
+Let vItemCount = NoOfRows('Items');
+
+For i = 0 To $(vItemCount) - 1
+
+	Let vItemCode = Peek('ItemCode', $(i), 'Items'); 
+    Let vType = Peek('Tipo', $(i), 'Items'); 
+    Let vResiduo = Peek('Gestión residuo', $(i), 'Items'); 
+    
+    Trace $(vItemCode) - $(vResiduo);
+          
+    [PrecioMedio_TMP]:
+    LOAD
+    	if("Ent/Sal" = 'Salida',
+        	Floor("DocDate") & '_' & ApplyMap('MAP_PMItem', "Art.Fab.", '*')  & '_' & if(Len(Trim("Máquina")) <> 0, "Máquina", '*'),
+            ''
+		) as Key,
+        '$(vType)' as "Tipo consumo",
+    	*;
+	SQL call "ALIER"."SE_PRECIOMEDIO"('$(vItemCode)', '$(vResiduo)');
+    
+    if ScriptError <> 0 then
+    	Trace Error -> $(vItemCode) - $(vResiduo);
+    EndIf;
+
+Next i;
+
+// Afegir el % del repartiment de fabricació al preu mig
+Left Join([PrecioMedio_TMP])
+	Load
+    *
+    Resident [RepartoFabricacionPM];
+
+[PrecioMedio]:
+	Load
+    	"Porcentaje" * ImporteSalida as "Importe precio medio",
+        "Porcentaje 1ª" * ImporteSalida as "Importe precio medio 1ª",
+        
+        //>> 1.5.19	FGT 06/03/23
+        "Porcentaje" * Cantidad as "Cantidad precio medio",
+        "Porcentaje 1ª" * Cantidad as "Cantidad precio medio 1ª",        
+        //<< 1.5.19	FGT 06/03/23
+        
+    	*;
+        
+	Load
+        "Ent/Sal",
+        Operación,
+        CreateDate,
+        DocTime,
+        TransNum,
+        DocDate,
+        ItemCode,
+        DocNum,
+        Cantidad,
+        ImporteOperacionSAP,
+        ImporteSalida,
+        CantidadAcumulada,
+        ImporteAcumulado,
+        PrecioMedio,        
+        "Art.Fab.",
+        "Tipo consumo",
+        if(Len(Trim("Grupo artículo PM")) <> 0, "Grupo artículo PM", ApplyMap('MAP_PMItem', "Art.Fab.", '')) as "Grupo artículo",
+        If(Len(Trim("Máquina PM")) <> 0, "Máquina PM", Right("Máquina",1)) as "Máquina",
+        If(Len(Trim(Porcentaje)) <> 0, Porcentaje, 1) as Porcentaje,
+        If(Len(Trim("Porcentaje 1ª")) <> 0, "Porcentaje 1ª", 1) as "Porcentaje 1ª"
+	Resident [PrecioMedio_TMP];    
+    
+Drop Tables [RepartoFabricacionPM], [PrecioMedio_TMP], [Items];
+Set vItemCount = ; 
+Set vItemCode = ;
+Set vType = ;
+Set vResiduo = ;
+
+//>> 1.5.23 FGT 13/04/23
+Set vGroupFilter = ;
+Set vResiduoFilter = ;
+//<< 1.5.23 FGT 13/04/23
+
+Call Table2QVD ('PrecioMedio');
+///$tab --- Exit Script ---
+Exit Script;
+///$tab Sección
+///SE_MovimientosInventario
+
+
+
+
+LOAD
+    ItemCode,
+    ItemName,    
+    "InvntryUom",
+    DocDate,    
+  	If(InQty > 0, 'Entrada',
+        If(OutQty > 0, 'Salida',
+            If(TransValue > 0, '(+) Coste', If(TransValue < 0, '(+) Coste'))
+        )    
+    ) as "Ent/Sal",
+    "Tipo transacción" as "Operación",
+    BASE_REF,
+    If(InQty = 0, -1 * OutQty > 0, InQty) as Cantidad,
+	TransValue AS "Importe",
+	"CreateDate",
+	"DocTime",
+	"TransNum",
+	
+    ItmsGrpCod,
+    ItmsGrpNam,
+    "Grupo artículo"
+
+    
+    
+//     CASE S0."TransType" 
+// 		WHEN '59' THEN (
+// 			SELECT R2."ItemCode" 
+// 			FROM OIGN R0 
+// 				INNER JOIN IGN1 R1 ON R0."DocEntry" = R1."DocEntry" 
+// 				INNER JOIN OWOR R2 ON R1."BaseType" = R2."ObjType" 
+// 				AND R1."BaseEntry" = R2."DocEntry" 
+// 			WHERE S0."TransType" = R0."ObjType" 
+// 			AND S0."CreatedBy" = R0."DocEntry" 
+// 			AND S0."DocLineNum" = R1."LineNum" 
+// 			AND R1."BaseType" = '202') 
+// 		WHEN '60' THEN (
+// 			SELECT R2."ItemCode" 
+// 			FROM OIGE R0 
+// 				INNER JOIN IGE1 R1 ON R0."DocEntry" = R1."DocEntry" 
+// 				INNER JOIN OWOR R2 ON R1."BaseType" = R2."ObjType" 
+// 				AND R1."BaseEntry" = R2."DocEntry" 
+// 			WHERE S0."TransType" = R0."ObjType" 
+// 				AND S0."CreatedBy" = R0."DocEntry" 
+// 				AND S0."DocLineNum" = R1."LineNum" 
+// 				AND R1."BaseType" = '202') 
+// 		ELSE '' 
+// 	END AS "Art.Fab.",
+
+// 	CASE S0."TransType" 
+// 		WHEN '59' THEN (
+// 			SELECT	 R2."U_SE_AP_MQ" 
+// 			FROM OIGN R0 
+// 			INNER JOIN IGN1 R1 ON R0."DocEntry" = R1."DocEntry" 
+// 			INNER JOIN OWOR R2 ON R1."BaseType" = R2."ObjType" 
+// 			AND R1."BaseEntry" = R2."DocEntry" 
+// 			WHERE S0."TransType" = R0."ObjType" 
+// 			AND S0."CreatedBy" = R0."DocEntry" 
+// 			AND S0."DocLineNum" = R1."LineNum" 
+// 			AND R1."BaseType" = '202') 
+// 		WHEN '60' 
+// 		THEN (SELECT R2."U_SE_AP_MQ" 
+// 			FROM OIGE R0 
+// 				INNER JOIN IGE1 R1 ON R0."DocEntry" = R1."DocEntry" 
+// 				INNER JOIN OWOR R2 ON R1."BaseType" = R2."ObjType" 
+// 				AND R1."BaseEntry" = R2."DocEntry" 
+// 			WHERE S0."TransType" = R0."ObjType" 
+// 				AND S0."CreatedBy" = R0."DocEntry" 
+// 				AND S0."DocLineNum" = R1."LineNum" 
+// 				AND R1."BaseType" = '202') 
+// 		ELSE '' 
+// 		END AS "Máquina"
+FROM [lib://ALIER_DATA:DataFiles/WhseJournals.qvd]
+(qvd)
+where InQty <> 0 or OutQty <> 0 or TransValue <> 0;
+
+
+
+
+
+[MAP_TaxDate]:
+	Mapping
+    Load
+    	"SalesHeader_Key",
+		"TaxDate"
+    FROM [lib://ALIER_DATA:DataFiles/SalesHeader.qvd]
+    (qvd)
+    Where Match("Tipo documento", 'Albarán') <> 0;
+
+
+    Concatenate
+    Load
+    	"SalesHeader_Key",
+		"TaxDate",
+        "ObjType",
+        "DocEntry",
+        "DocNum",
+        "CardCode",
+        "CardName",
+        "TaxDate" AS "CreateDate",
+	 	9999 AS "DocTime"
+    FROM [lib://ALIER_DATA:DataFiles/SalesHeader.qvd]
+    (qvd)
+    Where 
+    (
+    	(Match("Tipo documento", 'Albarán', 'Devolución') <> 0 and "DocStatus" = 'O') 
+    	or 
+		Match("Tipo documento", 'Factura', 'Abono') <> 0 
+    )  
+    AND "CANCELED" = 'N';
+    
+    Inner Join
+    Load
+    	"SalesHeader_Key",
+      	ApplyMap('MAP_TaxDate', "BaseHeader_Key", "TaxDate") as "TaxDate",
+        "ItemCode",
+        if (Match("Tipo documento", 'Albarán', 'Devolución') <> 0, "OpenQty") AS "Quantity",
+		"Price" * (100 - "Descuento cabecera") / 100 AS "Price",
+		"Descuento cabecera" as "DocDiscount",
+		if (Match("Tipo documento", 'Abono', 'Devolución') <> 0, -1, 1) *
+        if (Match("Tipo documento", 'Albarán', 'Devolución') <> 0, "OpenQty") * 
+        "Price" * (100 - "Descuento cabecera") / 100 as "Total" 
+    FROM [lib://ALIER_DATA:DataFiles/SalesLine.qvd]
+    (qvd)
+    Where 
+    (
+    	(Match("Tipo documento", 'Albarán', 'Devolución') <> 0 and "LineStatus" = 'O') 
+    	or 
+		Match("Tipo documento", 'Factura', 'Abono') <> 0 
+    )  
+    AND "CANCELED" = 'N';
+    
